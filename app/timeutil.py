@@ -32,7 +32,7 @@ def to_ns(value: float | int | str | datetime) -> int:
             text = text[:-1] + "+00:00"
         dt = datetime.fromisoformat(text)
     elif isinstance(value, (int, float)):
-        return _numeric_to_ns(float(value))
+        return _numeric_to_ns(value)
     else:
         raise ValueError(f"unsupported timestamp type: {type(value)!r}")
 
@@ -41,7 +41,9 @@ def to_ns(value: float | int | str | datetime) -> int:
     return int(dt.timestamp() * 1_000_000_000)
 
 
-def _numeric_to_ns(v: float) -> int:
+def _numeric_to_ns(v: float | int) -> int:
+    # Integers stay in exact integer arithmetic: epoch ns values exceed 2**53
+    # and would be rounded if routed through float.
     a = abs(v)
     if a >= _US_MAX:
         return int(v)                                  # already nanoseconds

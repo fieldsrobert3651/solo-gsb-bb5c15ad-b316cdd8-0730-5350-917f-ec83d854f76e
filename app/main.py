@@ -15,6 +15,7 @@ from .models import (
     BatchIngestRequest,
     BatchIngestResponse,
     DecisionResponse,
+    ServiceTimeResponse,
     StatsResponse,
 )
 from .storage import Storage
@@ -84,6 +85,7 @@ def root() -> dict[str, str]:
         "health": "/health",
         "ingest": "POST /api/v1/spans:batch",
         "decisions": "GET /api/v1/decisions/{trace_id}",
+        "service_time": "GET /api/v1/traces/{trace_id}/service-time",
     }
 
 
@@ -128,6 +130,19 @@ def get_decisions(req: BatchDecisionRequest) -> BatchDecisionResponse:
         decisions={tid: DecisionResponse(**view) for tid, view in views.items()},
         missing=missing,
     )
+
+
+@app.get(
+    "/api/v1/traces/{trace_id}/service-time",
+    response_model=ServiceTimeResponse,
+    tags=["traces"],
+    summary="Exclusive time spent per service in one trace",
+)
+def get_service_time(trace_id: str) -> ServiceTimeResponse:
+    view = get_engine().get_service_time(trace_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return ServiceTimeResponse(**view)
 
 
 @app.get("/api/v1/stats", response_model=StatsResponse, tags=["admin"])

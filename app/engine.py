@@ -20,6 +20,7 @@ import threading
 from typing import Any
 
 from . import sampler
+from . import servicetime
 from .config import Settings
 from .models import SpanIn
 from .storage import Storage, _attrs_signal_error
@@ -361,6 +362,23 @@ class SamplingEngine:
             views = {tid: self._view(tid) for tid in known}
             missing = [tid for tid in trace_ids if tid not in known]
             return views, missing
+
+    def get_service_time(self, tid: str) -> dict[str, Any] | None:
+        """Exclusive time per service from one consistent snapshot.
+
+        Works for decided and open traces alike; for open traces the snapshot
+        spans exactly what has been received at query time (the engine lock
+        serializes against ingest). Returns None for unknown traces.
+        """
+        with self._lock:
+            if self.storage.get_trace(tid) is None:
+                return None
+            rows = list(self.storage.iter_span_rows(tid))
+            return {
+                "trace_id": tid,
+                "span_count": len(rows),
+                "services": servicetime.exclusive_by_service(rows),
+            }
 
     def stats(self) -> dict[str, Any]:
         with self._lock:

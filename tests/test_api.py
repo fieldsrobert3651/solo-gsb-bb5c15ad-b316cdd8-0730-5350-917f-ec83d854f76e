@@ -182,6 +182,86 @@ def test_batch_decision_query_and_stats(client):
     assert stats["decided_traces"] == stats["retained"] + stats["dropped"]
 
 
+def _custom_span(trace_id, span_id, start_ms, end_ms, *, service,
+                 parent_span_id=None):
+    # Integer epoch ns: exact, avoids ISO float-rounding in comparisons.
+    base_ns = 1577836800 * 10**9 + 60 * 60 * 10**9  # BASE + 60 minutes
+    return {
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "parent_span_id": parent_span_id,
+        "name": "op",
+        "service": service,
+        "start_time": base_ns + start_ms * 10**6,
+        "end_time": base_ns + end_ms * 10**6,
+        "status": "ok",
+        "attributes": {},
+    }
+
+
+def test_service_time_unknown_trace_returns_404(client):
+    resp = client.get("/api/v1/traces/no-such-trace/service-time")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "trace not found"
+
+
+def test_service_time_for_open_trace_uses_current_snapshot(client):
+    tid = "st-open"
+    client.post("/api/v1/spans:batch", json={"spans": [
+        _custom_span(tid, "root", 0, 100, service="gateway"),
+        _custom_span(tid, "a", 10, 50, service="auth", parent_span_id="root"),
+    ]})
+
+    # Open traces are queryable from the spans received so far:
+    # root 100 - 40 = 60 (gateway), child leaf = 40 (auth).
+    resp = client.get(f"/api/v1/traces/{tid}/service-time")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trace_id"] == tid
+    assert body["span_count"] == 2
+    assert body["services"] == [
+        {"service": "gateway", "span_count": 1, "exclusive_ns": 60_000_000},
+        {"service": "auth", "span_count": 1, "exclusive_ns": 40_000_000},
+    ]
+
+    # A newly received child extends the consistent snapshot on re-query.
+    client.post("/api/v1/spans:batch", json={"spans": [
+        _custom_span(tid, "b", 50, 90, service="auth", parent_span_id="root"),
+    ]})
+    body = client.get(f"/api/v1/traces/{tid}/service-time").json()
+    assert body["span_count"] == 3
+    assert body["services"] == [
+        {"service": "auth", "span_count": 2, "exclusive_ns": 80_000_000},
+        {"service": "gateway", "span_count": 1, "exclusive_ns": 20_000_000},
+    ]
+
+
+def test_service_time_after_close_handles_null_group_and_overlaps(client):
+    tid = "st-closed"
+    client.post("/api/v1/spans:batch", json={"spans": [
+        _custom_span(tid, "root", 0, 100, service="a", parent_span_id=None),
+        # Two overlapping children: union [10, 80) subtracted only once.
+        _custom_span(tid, "c1", 10, 60, service="b", parent_span_id="root"),
+        _custom_span(tid, "c2", 50, 80, service="b", parent_span_id="root"),
+        # Self-referencing parent-child: ignored entirely.
+        _custom_span(tid, "loop", 90, 95, service="a", parent_span_id="loop"),
+        # Missing service -> null group.
+        _custom_span(tid, "anon", 95, 100, service=None,
+                     parent_span_id="root"),
+    ]})
+    client.post("/api/v1/admin/force-flush")
+
+    resp = client.get(f"/api/v1/traces/{tid}/service-time")
+    assert resp.status_code == 200
+    services = resp.json()["services"]
+    # a: root (100 - 75 = 25) + loop (5) = 30; b: 50 + 30 = 80; null: 5.
+    assert services == [
+        {"service": "b", "span_count": 2, "exclusive_ns": 80_000_000},
+        {"service": "a", "span_count": 2, "exclusive_ns": 30_000_000},
+        {"service": None, "span_count": 1, "exclusive_ns": 5_000_000},
+    ]
+
+
 def test_decisions_survive_engine_restart(client, tmp_path):
     from app.config import Settings
     from app.engine import SamplingEngine
