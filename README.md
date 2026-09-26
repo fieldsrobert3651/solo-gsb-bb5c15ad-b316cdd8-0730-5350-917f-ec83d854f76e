@@ -182,6 +182,37 @@ Unknown trace id → `404`.
 
 Returns `{ "decisions": { ... }, "missing": [ ... ] }`.
 
+### `GET /api/v1/traces/{trace_id}/service-time` — exclusive time per service
+
+Breaks a trace down by service to show where the time actually went. For
+every span, the **exclusive** (self) time is its own `[start, end)` length
+minus the union of the intersections with its *direct* child spans —
+overlapping children are subtracted only once, self-referencing parent links
+are ignored, and zero-length spans contribute 0. Spans are then grouped by
+`service` (spans without one fall into the `null` group).
+
+```bash
+curl -s http://localhost:8080/api/v1/traces/abc-123/service-time
+```
+
+```json
+{
+  "trace_id": "abc-123",
+  "span_count": 4,
+  "services": [
+    {"service": "checkout", "span_count": 1, "exclusive_ns": 600000000},
+    {"service": "payments", "span_count": 2, "exclusive_ns": 500000000},
+    {"service": null, "span_count": 1, "exclusive_ns": 100000000}
+  ]
+}
+```
+
+* `services` is sorted by `exclusive_ns` descending, then service name
+  ascending; the `null` group sorts last within equal `exclusive_ns`.
+* Works for traces in any state: open traces are evaluated from a consistent
+  snapshot of the spans received so far, decided traces from the stored spans.
+* Unknown trace id → `404`.
+
 ### Other endpoints
 
 | Method & path | Purpose |
@@ -252,4 +283,5 @@ pytest -q
 
 The test suite covers priority budget saturation, slow/error classification,
 stable-hash fill counts, determinism, duplicate/late span handling, batch
-queries, timestamp formats, and crash recovery from SQLite.
+queries, timestamp formats, per-service exclusive-time breakdown, and crash
+recovery from SQLite.

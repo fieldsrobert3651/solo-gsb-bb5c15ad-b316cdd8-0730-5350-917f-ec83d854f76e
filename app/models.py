@@ -86,6 +86,19 @@ class BatchDecisionResponse(BaseModel):
     missing: list[str]
 
 
+class ServiceTimeEntry(BaseModel):
+    service: str | None
+    span_count: int
+    exclusive_ns: int
+
+
+class ServiceTimeResponse(BaseModel):
+    trace_id: str
+    span_count: int
+    # Sorted by exclusive_ns desc, service name asc, null service last.
+    services: list[ServiceTimeEntry]
+
+
 class StatsResponse(BaseModel):
     open_traces: int
     pending_normal: int

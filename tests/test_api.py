@@ -44,6 +44,57 @@ def test_health_and_config(client):
 def test_unknown_trace_returns_404(client):
     resp = client.get("/api/v1/decisions/does-not-exist")
     assert resp.status_code == 404
+    resp = client.get("/api/v1/traces/does-not-exist/service-time")
+    assert resp.status_code == 404
+
+
+def test_service_time_breakdown_open_snapshot_and_after_flush(client):
+    base_ns = 1_600_000_000 * 10**9
+    spans = [
+        {  # web root: 1000ms total, children cover [100,400)+[300,500) once
+            "trace_id": "st-1", "span_id": "root", "service": "web",
+            "name": "GET /", "start_time": base_ns,
+            "end_time": base_ns + 1_000_000_000, "status": "ok",
+        },
+        {
+            "trace_id": "st-1", "span_id": "c1", "parent_span_id": "root",
+            "service": "db", "start_time": base_ns + 100_000_000,
+            "end_time": base_ns + 400_000_000, "status": "ok",
+        },
+        {  # overlaps c1 by 100ms -> union [100,500) = 400ms deducted once
+            "trace_id": "st-1", "span_id": "c2", "parent_span_id": "root",
+            "service": "db", "start_time": base_ns + 300_000_000,
+            "end_time": base_ns + 500_000_000, "status": "ok",
+        },
+        {  # no service -> null group; self-parenting link ignored
+            "trace_id": "st-1", "span_id": "c3", "parent_span_id": "c3",
+            "service": None, "start_time": base_ns + 800_000_000,
+            "end_time": base_ns + 900_000_000, "status": "ok",
+        },
+    ]
+    resp = client.post("/api/v1/spans:batch", json={"spans": spans})
+    assert resp.json()["accepted"] == 4
+
+    expected = {
+        "trace_id": "st-1",
+        "span_count": 4,
+        "services": [
+            # web: 1000ms - 400ms union of direct children
+            {"service": "web", "span_count": 1, "exclusive_ns": 600_000_000},
+            # db: 300ms + 200ms (children of root do not reduce each other)
+            {"service": "db", "span_count": 2, "exclusive_ns": 500_000_000},
+            {"service": None, "span_count": 1, "exclusive_ns": 100_000_000},
+        ],
+    }
+
+    # Open trace: snapshot of spans received so far.
+    assert client.get("/api/v1/traces/st-1/service-time").json() == expected
+
+    # After the trace is decided the stored spans give the same breakdown.
+    client.post("/api/v1/admin/force-flush")
+    resp = client.get("/api/v1/traces/st-1/service-time")
+    assert resp.status_code == 200
+    assert resp.json() == expected
 
 
 def test_error_traces_have_priority_and_consume_budget(client):

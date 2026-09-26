@@ -5,6 +5,7 @@ import pytest
 
 from app.timeutil import minute_bucket, to_ns
 from app.sampler import hash_score, select_by_hash, stable_hash
+from app.servicetime import service_time_breakdown
 from app.models import SpanIn
 from pydantic import ValidationError
 
@@ -67,3 +68,82 @@ def test_select_by_hash_exact_counts_and_stability():
     assert kept == [] and len(dropped) == 20
     kept, dropped = select_by_hash(ids, 100)
     assert len(kept) == 20 and dropped == []
+
+
+# ------------------------------------------------------- service-time breakdown
+
+
+def _mk(span_id, start, end, *, parent=None, service="svc"):
+    return {
+        "span_id": span_id,
+        "parent_span_id": parent,
+        "service": service,
+        "start_ns": start,
+        "end_ns": end,
+    }
+
+
+def test_breakdown_subtracts_direct_children_only():
+    spans = [
+        _mk("root", 0, 100, service="web"),
+        _mk("child", 10, 40, parent="root", service="db"),
+        _mk("grand", 20, 30, parent="child", service="cache"),
+    ]
+    rows = {r["service"]: r for r in service_time_breakdown(spans)}
+    # root: 100 - [10,40) = 70; grandchild does not touch root directly.
+    assert rows["web"] == {"service": "web", "span_count": 1,
+                           "exclusive_ns": 70}
+    # child: 30 - [20,30) = 20.
+    assert rows["db"]["exclusive_ns"] == 20
+    assert rows["cache"]["exclusive_ns"] == 10
+
+
+def test_breakdown_overlapping_children_deducted_once():
+    spans = [
+        _mk("root", 0, 100),
+        _mk("a", 10, 60, parent="root", service="x"),
+        _mk("b", 40, 90, parent="root", service="y"),
+    ]
+    rows = {r["service"]: r for r in service_time_breakdown(spans)}
+    # Union of children is [10,90) = 80, not 50+50.
+    assert rows["svc"]["exclusive_ns"] == 20
+
+
+def test_breakdown_ignores_self_reference_and_clamps_children():
+    spans = [
+        _mk("self", 0, 50, parent="self"),          # self-link ignored
+        _mk("root", 0, 40, service="web"),
+        _mk("wide", 30, 100, parent="root", service="db"),  # spills past root
+    ]
+    rows = {r["service"]: r for r in service_time_breakdown(spans)}
+    assert rows["svc"]["exclusive_ns"] == 50
+    # Child intersection is clamped to [30,40) = 10.
+    assert rows["web"]["exclusive_ns"] == 30
+    assert rows["db"]["exclusive_ns"] == 70
+
+
+def test_breakdown_zero_duration_and_missing_parent():
+    spans = [
+        _mk("point", 10, 10),                        # zero length -> 0
+        _mk("orphan", 0, 5, parent="not-present"),   # unknown parent ignored
+    ]
+    rows = service_time_breakdown(spans)
+    assert rows == [
+        {"service": "svc", "span_count": 2, "exclusive_ns": 5},
+    ]
+
+
+def test_breakdown_groups_null_service_and_sorts():
+    spans = [
+        _mk("a", 0, 10, service="beta"),
+        _mk("b", 0, 30, service=None),
+        _mk("c", 0, 20, service="alpha"),
+        _mk("d", 0, 20, service="beta"),
+    ]
+    rows = service_time_breakdown(spans)
+    # exclusive desc, then name asc with the null group last within a tie.
+    assert [(r["service"], r["exclusive_ns"], r["span_count"]) for r in rows] == [
+        ("beta", 30, 2),      # 10 + 20 accumulated
+        (None, 30, 1),
+        ("alpha", 20, 1),
+    ]

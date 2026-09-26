@@ -22,6 +22,7 @@ from typing import Any
 from . import sampler
 from .config import Settings
 from .models import SpanIn
+from .servicetime import service_time_breakdown
 from .storage import Storage, _attrs_signal_error
 from .timeutil import minute_bucket, now_ns, to_ns
 
@@ -354,6 +355,22 @@ class SamplingEngine:
             if self.storage.get_trace(tid) is None:
                 return None
             return self._view(tid)
+
+    def get_service_time(self, tid: str) -> dict[str, Any] | None:
+        """Exclusive (self) time per service for one trace.
+
+        Open traces are evaluated from the spans received so far; the lock
+        makes that read a consistent snapshot.
+        """
+        with self._lock:
+            if self.storage.get_trace(tid) is None:
+                return None
+            spans = [dict(r) for r in self.storage.iter_span_rows(tid)]
+            return {
+                "trace_id": tid,
+                "span_count": len(spans),
+                "services": service_time_breakdown(spans),
+            }
 
     def get_decisions(self, trace_ids: list[str]) -> tuple[dict[str, Any], list[str]]:
         with self._lock:
